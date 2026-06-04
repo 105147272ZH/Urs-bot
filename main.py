@@ -16,6 +16,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiohttp
 from datetime import datetime
+from aiohttp import web
 
 load_dotenv()
 
@@ -26,6 +27,7 @@ YOUR_SERVER_ID = int(os.getenv("YOUR_SERVER_ID", "1428154519266656278"))
 PANDW_NATION_ID = 634658
 PANDW_ALLIANCE_ID = 14873
 PANDW_BASE = "https://politicsandwar.com/api"
+PORT = int(os.getenv("PORT", 8080))
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("urs-commissar")
@@ -33,6 +35,23 @@ logger = logging.getLogger("urs-commissar")
 # Enable all intents
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ============================================================================
+# HTTP Server (for Render health checks)
+# ============================================================================
+
+async def health_check(request):
+    return web.Response(text="☭ URS Commissar Online", status=200)
+
+async def start_http_server():
+    """Start a dummy HTTP server on PORT for Render."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"☭ HTTP server listening on port {PORT}")
 
 # ============================================================================
 # P&W API Helper - DEBUG MODE
@@ -400,13 +419,17 @@ async def status_command(interaction: discord.Interaction):
 # Entry Point
 # ============================================================================
 
-def main():
+async def main():
+    # Start HTTP server
+    await start_http_server()
+    
+    # Start Discord bot
     if not DISCORD_TOKEN or not P_AND_W_API_KEY:
         logger.error("❌ Missing DISCORD_TOKEN or P_AND_W_API_KEY")
         return
     
     logger.info("☭ URS Commissar starting...")
-    bot.run(DISCORD_TOKEN)
+    await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
