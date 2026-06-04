@@ -30,7 +30,8 @@ PANDW_BASE = "https://politicsandwar.com/api"
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("urs-commissar")
 
-intents = discord.Intents.default()
+# Enable all intents
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============================================================================
