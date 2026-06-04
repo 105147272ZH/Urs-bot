@@ -27,18 +27,18 @@ PANDW_NATION_ID = 634658
 PANDW_ALLIANCE_ID = 14873
 PANDW_BASE = "https://politicsandwar.com/api"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("urs-commissar")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============================================================================
-# P&W API Helper
+# P&W API Helper - DEBUG MODE
 # ============================================================================
 
 async def pandw_query(session: aiohttp.ClientSession, query: str, variables: dict = None):
-    """Execute GraphQL query against P&W API."""
+    """Execute GraphQL query against P&W API with debug logging."""
     url = f"{PANDW_BASE}/graphql"
     payload = {
         "query": query,
@@ -46,15 +46,30 @@ async def pandw_query(session: aiohttp.ClientSession, query: str, variables: dic
     }
     headers = {"Authorization": f"Bearer {P_AND_W_API_KEY}"}
     
+    logger.debug(f"Sending request to {url}")
+    logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+    logger.debug(f"Headers: {headers}")
+    
     async with session.post(url, json=payload, headers=headers) as resp:
+        logger.debug(f"Response status: {resp.status}")
+        text = await resp.text()
+        logger.debug(f"Response body (first 500 chars): {text[:500]}")
+        
         if resp.status != 200:
-            text = await resp.text()
             logger.error(f"P&W API error {resp.status}: {text}")
             raise RuntimeError(f"P&W API {resp.status}: {text}")
-        data = await resp.json()
+        
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            logger.error(f"Response was: {text}")
+            raise RuntimeError(f"Invalid JSON response: {e}")
+        
         if "errors" in data:
             logger.error(f"GraphQL errors: {data['errors']}")
             raise RuntimeError(f"GraphQL errors: {data['errors']}")
+        
         return data.get("data", {})
 
 # ============================================================================
@@ -94,50 +109,39 @@ class WarAnalyzer:
                      has_munitions: bool = True, has_gasoline: bool = True) -> float:
         """Calculate combat value for a unit set (40%-100% bracket system)."""
         cv = 0.0
-        # Soldiers: base 1.0, or 1.75 if supplied with munitions
         if soldiers > 0:
             soldier_cv = 1.75 if has_munitions else 1.0
             cv += soldiers * soldier_cv
-        # Tanks: require both munitions AND gasoline; 0 CV if unsupplied
         if tanks > 0 and has_munitions and has_gasoline:
             cv += tanks * 1.0
-        # Aircraft: base 1.0 per unit
         cv += aircraft * 1.0
-        # Ships: base 1.0 per unit
         cv += ships * 1.0
         return cv
     
     def simulate_battle(self, att_soldiers: int, att_tanks: int, att_aircraft: int, att_ships: int,
                         def_soldiers: int, def_tanks: int, def_aircraft: int, def_ships: int,
                         scenario: str = "average") -> Dict:
-        """
-        Simulate a single battle with 3-roll system.
-        scenario: "worst" (40% us, 100% them), "average" (70% both), "best" (100% us, 40% them)
-        """
-        # Assume full supply (workaround for hidden inventory)
+        """Simulate a single battle with 3-roll system."""
         att_cv = self.combat_value(att_soldiers, att_tanks, att_aircraft, att_ships, True, True)
         def_cv = self.combat_value(def_soldiers, def_tanks, def_aircraft, def_ships, True, True)
         
-        # Apply air superiority if we hold it
         if self.air_superiority == "Attacker":
-            def_cv *= 0.5  # Enemy tanks halved
+            def_cv *= 0.5
         
-        # Scenario roll multipliers
         if scenario == "worst":
             att_roll = 0.40
             def_roll = 1.00
         elif scenario == "best":
             att_roll = 1.00
             def_roll = 0.40
-        else:  # average
+        else:
             att_roll = 0.70
             def_roll = 0.70
         
         att_damage = att_cv * att_roll
         def_damage = def_cv * def_roll
         
-        # Victory tier based on damage ratio
-        ratio = att_damage / (def_damage + 0.001)  # avoid divide by zero
+        ratio = att_damage / (def_damage + 0.001)
         if ratio >= 2.5:
             victory = "Immense Triumph"
             resistance_burn = 2
@@ -159,8 +163,7 @@ class WarAnalyzer:
             resistance_burn = 0
             loot_percent = 0.0
         
-        # Estimate attacker casualties (inverse ratio)
-        casualty_multiplier = (def_damage / (att_damage + 0.001)) * 0.1  # rough scale
+        casualty_multiplier = (def_damage / (att_damage + 0.001)) * 0.1
         att_soldier_loss = int(att_soldiers * casualty_multiplier * 0.6)
         att_tank_loss = int(att_tanks * casualty_multiplier * 0.4)
         
@@ -185,30 +188,22 @@ class WarAnalyzer:
         return result["victory"] not in ["Failure / Defeat"]
     
     def build_strategy(self) -> Tuple[str, List[str]]:
-        """
-        Determine optimal attack sequence for this war.
-        Returns: (strategy_summary, attack_sequence_list)
-        """
+        """Determine optimal attack sequence for this war."""
         sequence = []
         summary = ""
         
-        # Check if we can even win
         if not self.can_win():
             return ("❌ CANNOT WIN - Even with perfect rolls, attacker is too strong.", [])
         
-        # Path A: Enemy has strong air force → Airstrikes first to break air superiority
         if self.def_aircraft > 50:
             sequence.append("Air Strike (Break enemy aircraft)")
             summary += "• Enemy has strong air presence. Airstrikes first to secure air superiority.\n"
         
-        # Path B: Enemy has strong navy AND we don't have naval blockade → Naval attack
         if self.def_ships > 20 and self.naval_blockade != "Attacker":
             sequence.append("Naval Attack (Establish blockade)")
             summary += "• Establish naval blockade to cut resource trading.\n"
         
-        # Path C: Stack ground attacks to farm cash and burn resistance
-        # Calculate turns to beige
-        turns_to_beige = math.ceil(self.defender_resistance / 2.0)  # avg 2 resistance per hit
+        turns_to_beige = math.ceil(self.defender_resistance / 2.0)
         summary += f"• Ground attacks to burn resistance ({self.defender_resistance} → 0 = ~{turns_to_beige} turns).\n"
         
         for i in range(turns_to_beige):
@@ -230,7 +225,6 @@ class WarAnalyzer:
 🛡️ Defending: {self.defender['leader_name']} ({self.defender['nation_name']})
 
 ❌ **CANNOT WIN** — Even with perfect rolls (100% us, 40% them), attacker's military advantage is insurmountable.
-Worst-case casualty ratio is lethal.
             """
         
         strategy_summary, sequence = self.build_strategy()
@@ -251,7 +245,6 @@ Worst-case casualty ratio is lethal.
         for i, attack in enumerate(sequence, 1):
             report += f"{i}. {attack}\n"
         
-        # Add best/average/worst case for first ground attack
         best = self.simulate_battle(self.att_soldiers, self.att_tanks, self.att_aircraft, self.att_ships,
                                      self.def_soldiers, self.def_tanks, self.def_aircraft, self.def_ships,
                                      scenario="best")
@@ -263,16 +256,15 @@ Worst-case casualty ratio is lethal.
                                       scenario="worst")
         
         report += f"""
-**Combat Simulation (First Ground Attack):**
-🔵 **Average Case (70% rolls):** {avg['victory']} | Casualties: ~{avg['att_soldier_loss']:,} soldiers, ~{avg['att_tank_loss']:,} tanks
-🟢 **Best Case (100% us, 40% them):** {best['victory']} | Casualties: ~{best['att_soldier_loss']:,} soldiers, ~{best['att_tank_loss']:,} tanks
-🔴 **Worst Case (40% us, 100% them):** {worst['victory']} | Casualties: ~{worst['att_soldier_loss']:,} soldiers, ~{worst['att_tank_loss']:,} tanks
+**Combat Simulation:**
+🔵 **Average (70% rolls):** {avg['victory']} | Casualties: ~{avg['att_soldier_loss']:,} soldiers, ~{avg['att_tank_loss']:,} tanks
+🟢 **Best (100% us, 40% them):** {best['victory']} | Casualties: ~{best['att_soldier_loss']:,} soldiers, ~{best['att_tank_loss']:,} tanks
+🔴 **Worst (40% us, 100% them):** {worst['victory']} | Casualties: ~{worst['att_soldier_loss']:,} soldiers, ~{worst['att_tank_loss']:,} tanks
 
-**Final Notes:**
-• Resistance: {self.defender_resistance}/100 (~{math.ceil(self.defender_resistance / 2)} ground attacks to beige)
-• Attacker MAPs: {self.attacker_map} available
-• Air Superiority: {"🟢 Attacker holds" if self.air_superiority == "Attacker" else "🔴 Defender holds" if self.air_superiority == "Defender" else "⚪ Contested"}
-• Naval Blockade: {"🟢 Attacker holds" if self.naval_blockade == "Attacker" else "❌ Not established"}
+**War State:**
+• Resistance: {self.defender_resistance}/100
+• Air Superiority: {"Attacker" if self.air_superiority == "Attacker" else "Defender" if self.air_superiority == "Defender" else "Contested"}
+• Naval Blockade: {"Active" if self.naval_blockade == "Attacker" else "None"}
         """
         
         return report
@@ -296,6 +288,22 @@ async def counter_command(interaction: discord.Interaction):
     
     try:
         async with aiohttp.ClientSession() as session:
+            logger.info("Testing P&W API connection...")
+            
+            # Test basic nation query first
+            test_query = """
+            query {
+              nation(id: 634658) {
+                id
+                leader_name
+                nation_name
+              }
+            }
+            """
+            
+            test_data = await pandw_query(session, test_query)
+            logger.info(f"Test query result: {test_data}")
+            
             # Fetch alliance wars
             wars_query = """
             query($id: Int!) {
@@ -318,25 +326,18 @@ async def counter_command(interaction: discord.Interaction):
             """
             
             wars_data = await pandw_query(session, wars_query, {"id": PANDW_ALLIANCE_ID})
+            logger.info(f"Wars data: {wars_data}")
             wars = wars_data.get("alliance", {}).get("wars", [])
             
             if not wars:
-                await interaction.followup.send("☭ No active wars detected. Peace reigns.")
+                await interaction.followup.send("☭ No active wars detected.")
                 return
             
-            # Filter defensive wars (we are defending)
-            defensive_wars = [w for w in wars if w.get("status") == "Active"]
-            
-            if not defensive_wars:
-                await interaction.followup.send("☭ No active defensive wars.")
-                return
-            
-            # Analyze each defensive war
-            for war in defensive_wars[:10]:  # Limit to 10 to avoid spam
+            # Analyze each war
+            for war in wars[:10]:
                 attacker_id = war.get("attacker_id")
                 defender_id = war.get("defender_id")
                 
-                # Fetch attacker and defender nations
                 nations_query = """
                 query($attacker: Int!, $defender: Int!) {
                   attacker: nation(id: $attacker) {
@@ -368,11 +369,9 @@ async def counter_command(interaction: discord.Interaction):
                 attacker = nations_data.get("attacker", {})
                 defender = nations_data.get("defender", {})
                 
-                # Build war analyzer
                 analyzer = WarAnalyzer(war, attacker, defender)
                 report = analyzer.generate_report()
                 
-                # Send report (chunk if needed)
                 if len(report) > 2000:
                     chunks = [report[i:i+1900] for i in range(0, len(report), 1900)]
                     for chunk in chunks:
@@ -380,20 +379,19 @@ async def counter_command(interaction: discord.Interaction):
                 else:
                     await interaction.followup.send(report)
                 
-                await asyncio.sleep(0.5)  # Rate limit
+                await asyncio.sleep(0.5)
     
     except Exception as e:
         logger.exception("Error in /counter")
-        await interaction.followup.send(f"❌ Communication with the Party has failed: {str(e)}")
+        error_msg = f"❌ Party communications failed: {str(e)}"
+        await interaction.followup.send(error_msg)
 
 @bot.tree.command(name="status", description="Show bot status")
 @app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
 async def status_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"☭ **URS Commissar Online**\n"
-        f"Alliance: URS (ID {PANDW_ALLIANCE_ID})\n"
-        f"Nation: ID {PANDW_NATION_ID}\n"
-        f"P&W API: {'✅ Connected' if P_AND_W_API_KEY else '❌ Not configured'}\n"
+        f"API Key configured: {bool(P_AND_W_API_KEY)}\n"
         f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
 
