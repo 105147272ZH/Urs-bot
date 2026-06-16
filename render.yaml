@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: urs-commissar-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: P_AND_W_API_KEY
+        sync: false
+      - key: YOUR_SERVER_ID
+        value: "1428154519266656278"
