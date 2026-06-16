@@ -1,50 +1,45 @@
 #!/usr/bin/env python3
 """
-Urs Commissar Bot - Precision War Strategy Engine for Politics & War
-Builds custom attack sequences per war based on 3-roll damage simulation.
+URS Commissar Bot v2.0 - Tactical War Intelligence & Economic Audit Engine
+Aesthetic: Soviet / Marxist-Leninist Vanguard
 """
 
 import os
-import json
-import math
 import asyncio
 import logging
-from typing import Optional, Dict, List, Tuple
-from dotenv import load_dotenv
+import sqlite3
+import math
+import random
+from datetime import datetime
 import discord
 from discord.ext import commands
 from discord import app_commands
 import aiohttp
-from datetime import datetime
 from aiohttp import web
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Config
+# --- CONFIGURATION & ENVIRONMENT ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-P_AND_W_API_KEY = os.getenv("P_AND_W_API_KEY")
+PANDW_API_KEY = os.getenv("P_AND_W_API_KEY")
 YOUR_SERVER_ID = int(os.getenv("YOUR_SERVER_ID", "1428154519266656278"))
-PANDW_NATION_ID = 634658
-PANDW_ALLIANCE_ID = 14873
-PANDW_BASE = "https://politicsandwar.com/api"
+ALLIANCE_ID = 14873
+GRAPHQL_URL = "https://api.politicsandwar.com/graphql"
 PORT = int(os.getenv("PORT", 8080))
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("urs-commissar")
 
-# Enable all intents
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+DB_FILE = "urs_state.db"
 
-# ============================================================================
-# HTTP Server (for Render health checks)
-# ============================================================================
-
+# --- HTTP SERVER FOR RENDER ---
 async def health_check(request):
     return web.Response(text="☭ URS Commissar Online", status=200)
 
 async def start_http_server():
-    """Start a dummy HTTP server on PORT for Render."""
     app = web.Application()
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
@@ -53,383 +48,204 @@ async def start_http_server():
     await site.start()
     logger.info(f"☭ HTTP server listening on port {PORT}")
 
-# ============================================================================
-# P&W API Helper - DEBUG MODE
-# ============================================================================
-
-async def pandw_query(session: aiohttp.ClientSession, query: str, variables: dict = None):
-    """Execute GraphQL query against P&W API with debug logging."""
-    url = f"{PANDW_BASE}/graphql"
-    payload = {
-        "query": query,
-        "variables": variables or {}
-    }
-    headers = {"Authorization": f"Bearer {P_AND_W_API_KEY}"}
-    
-    logger.debug(f"Sending request to {url}")
-    logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
-    logger.debug(f"Headers: {headers}")
-    
-    async with session.post(url, json=payload, headers=headers) as resp:
-        logger.debug(f"Response status: {resp.status}")
-        text = await resp.text()
-        logger.debug(f"Response body (first 500 chars): {text[:500]}")
-        
-        if resp.status != 200:
-            logger.error(f"P&W API error {resp.status}: {text}")
-            raise RuntimeError(f"P&W API {resp.status}: {text}")
-        
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-            logger.error(f"Response was: {text}")
-            raise RuntimeError(f"Invalid JSON response: {e}")
-        
-        if "errors" in data:
-            logger.error(f"GraphQL errors: {data['errors']}")
-            raise RuntimeError(f"GraphQL errors: {data['errors']}")
-        
-        return data.get("data", {})
-
-# ============================================================================
-# War Strategy Engine - 3-Roll Combat Simulator
-# ============================================================================
-
-class WarAnalyzer:
-    """Analyzes a single war and builds custom attack sequence."""
-    
-    def __init__(self, war_data: dict, attacker_data: dict, defender_data: dict):
-        self.war = war_data
-        self.attacker = attacker_data
-        self.defender = defender_data
-        
-        # Current war state
-        self.attacker_resistance = war_data.get("attacker_resistance", 100)
-        self.defender_resistance = war_data.get("defender_resistance", 100)
-        self.attacker_map = war_data.get("attacker_map", 0)
-        self.defender_map = war_data.get("defender_map", 0)
-        self.ground_control = war_data.get("ground_control", "")
-        self.air_superiority = war_data.get("air_superiority", "")
-        self.naval_blockade = war_data.get("naval_blockade", "")
-        
-        # Defender military (exact counts)
-        self.def_soldiers = defender_data.get("soldiers", 0)
-        self.def_tanks = defender_data.get("tanks", 0)
-        self.def_aircraft = defender_data.get("aircraft", 0)
-        self.def_ships = defender_data.get("ships", 0)
-        
-        # Attacker military (exact counts)
-        self.att_soldiers = attacker_data.get("soldiers", 0)
-        self.att_tanks = attacker_data.get("tanks", 0)
-        self.att_aircraft = attacker_data.get("aircraft", 0)
-        self.att_ships = attacker_data.get("ships", 0)
-    
-    def combat_value(self, soldiers: int, tanks: int, aircraft: int, ships: int, 
-                     has_munitions: bool = True, has_gasoline: bool = True) -> float:
-        """Calculate combat value for a unit set (40%-100% bracket system)."""
-        cv = 0.0
-        if soldiers > 0:
-            soldier_cv = 1.75 if has_munitions else 1.0
-            cv += soldiers * soldier_cv
-        if tanks > 0 and has_munitions and has_gasoline:
-            cv += tanks * 1.0
-        cv += aircraft * 1.0
-        cv += ships * 1.0
-        return cv
-    
-    def simulate_battle(self, att_soldiers: int, att_tanks: int, att_aircraft: int, att_ships: int,
-                        def_soldiers: int, def_tanks: int, def_aircraft: int, def_ships: int,
-                        scenario: str = "average") -> Dict:
-        """Simulate a single battle with 3-roll system."""
-        att_cv = self.combat_value(att_soldiers, att_tanks, att_aircraft, att_ships, True, True)
-        def_cv = self.combat_value(def_soldiers, def_tanks, def_aircraft, def_ships, True, True)
-        
-        if self.air_superiority == "Attacker":
-            def_cv *= 0.5
-        
-        if scenario == "worst":
-            att_roll = 0.40
-            def_roll = 1.00
-        elif scenario == "best":
-            att_roll = 1.00
-            def_roll = 0.40
-        else:
-            att_roll = 0.70
-            def_roll = 0.70
-        
-        att_damage = att_cv * att_roll
-        def_damage = def_cv * def_roll
-        
-        ratio = att_damage / (def_damage + 0.001)
-        if ratio >= 2.5:
-            victory = "Immense Triumph"
-            resistance_burn = 2
-            loot_percent = 0.75
-        elif ratio >= 1.8:
-            victory = "Massive Victory"
-            resistance_burn = 2
-            loot_percent = 0.65
-        elif ratio >= 1.2:
-            victory = "Strong Victory"
-            resistance_burn = 1
-            loot_percent = 0.50
-        elif ratio >= 0.8:
-            victory = "Pyrrhic Victory"
-            resistance_burn = 1
-            loot_percent = 0.35
-        else:
-            victory = "Failure / Defeat"
-            resistance_burn = 0
-            loot_percent = 0.0
-        
-        casualty_multiplier = (def_damage / (att_damage + 0.001)) * 0.1
-        att_soldier_loss = int(att_soldiers * casualty_multiplier * 0.6)
-        att_tank_loss = int(att_tanks * casualty_multiplier * 0.4)
-        
-        return {
-            "victory": victory,
-            "resistance_burn": resistance_burn,
-            "loot_percent": loot_percent,
-            "att_soldier_loss": att_soldier_loss,
-            "att_tank_loss": att_tank_loss,
-            "att_damage": att_damage,
-            "def_damage": def_damage,
-            "ratio": ratio
-        }
-    
-    def can_win(self) -> bool:
-        """Check if worst-case battle is winnable."""
-        result = self.simulate_battle(
-            self.att_soldiers, self.att_tanks, self.att_aircraft, self.att_ships,
-            self.def_soldiers, self.def_tanks, self.def_aircraft, self.def_ships,
-            scenario="worst"
+# --- DATABASE INITIALIZATION ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS registration (
+            discord_id INTEGER PRIMARY KEY,
+            nation_id INTEGER UNIQUE,
+            leader_name TEXT,
+            nation_name TEXT
         )
-        return result["victory"] not in ["Failure / Defeat"]
+    """)
+    conn.commit()
+    conn.close()
+
+# --- P&W GRAPHQL API CLIENT ---
+async def fetch_pw_api(query: str, variables: dict = None):
+    headers = {
+        "X-Api-Key": PANDW_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {"query": query, "variables": variables or {}}
     
-    def build_strategy(self) -> Tuple[str, List[str]]:
-        """Determine optimal attack sequence for this war."""
-        sequence = []
-        summary = ""
-        
-        if not self.can_win():
-            return ("❌ CANNOT WIN - Even with perfect rolls, attacker is too strong.", [])
-        
-        if self.def_aircraft > 50:
-            sequence.append("Air Strike (Break enemy aircraft)")
-            summary += "• Enemy has strong air presence. Airstrikes first to secure air superiority.\n"
-        
-        if self.def_ships > 20 and self.naval_blockade != "Attacker":
-            sequence.append("Naval Attack (Establish blockade)")
-            summary += "• Establish naval blockade to cut resource trading.\n"
-        
-        turns_to_beige = math.ceil(self.defender_resistance / 2.0)
-        summary += f"• Ground attacks to burn resistance ({self.defender_resistance} → 0 = ~{turns_to_beige} turns).\n"
-        
-        for i in range(turns_to_beige):
-            sequence.append(f"Ground Attack #{i+1} (Cash farm + resistance burn)")
-        
-        summary += f"• Final hit: Beige protection triggers, massive resource loot.\n"
-        
-        return (summary, sequence)
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(GRAPHQL_URL, json=payload, headers=headers, timeout=15) as response:
+                if response.status != 200:
+                    raw_err = await response.text()
+                    raise RuntimeError(f"API Error {response.status}: {raw_err}")
+                data = await response.json()
+                if "errors" in data:
+                    raise RuntimeError(f"GraphQL Error: {data['errors']}")
+                return data.get("data", {})
+        except Exception as e:
+            logger.error(f"API Communication breakdown: {str(e)}")
+            raise
+
+# --- CORE MILITARY CONSTANTS & UTILS ---
+MILITARY_CAPS = {
+    "soldiers_per_city": 15000,
+    "tanks_per_city": 1250,
+    "aircraft_per_city": 75,
+    "ships_per_city": 15
+}
+
+def chunk_text(text, max_chars=1800):
+    lines = text.split("\n")
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    for line in lines:
+        if current_length + len(line) + 1 > max_chars:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = len(line)
+        else:
+            current_chunk.append(line)
+            current_length += len(line) + 1
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    return chunks
+
+def calculate_combat_value(unit_type, count, supplied=True):
+    if count <= 0: return 0.0
+    if not supplied and unit_type in ["tanks", "aircraft", "ships"]: return 0.0
+    base_values = {"soldiers": 1.75, "tanks": 40.0, "aircraft": 80.0, "ships": 120.0}
+    return float(count * base_values.get(unit_type, 1.0))
+
+def run_3_roll_simulation(attacker_cv, defender_cv, air_superiority=False, is_tank=False):
+    if defender_cv <= 0: return "IMMENSE TRIUMPH", 0.0
+    if is_tank and air_superiority: defender_cv *= 0.5
+    att_rolls = sum([random.uniform(0.4, 1.0) * attacker_cv for _ in range(3)])
+    def_rolls = sum([random.uniform(0.4, 1.0) * defender_cv for _ in range(3)])
+    ratio = att_rolls / (def_rolls if def_rolls > 0 else 1.0)
     
-    def generate_report(self) -> str:
-        """Generate full Discord embed-formatted war report."""
-        can_win = self.can_win()
-        
-        if not can_win:
-            return f"""
-🔴 WAR #{self.war['id']}
-⚔️ Attacker: {self.attacker['leader_name']} ({self.attacker['nation_name']}) — Score {self.attacker['score']}
-  🪖 {self.att_soldiers:,} | 🛡️ {self.att_tanks:,} | ✈️ {self.att_aircraft:,} | 🚢 {self.att_ships:,}
-🛡️ Defending: {self.defender['leader_name']} ({self.defender['nation_name']})
+    if ratio >= 1.75: return "IMMENSE TRIUMPH", ratio
+    elif ratio >= 1.25: return "MAJOR VICTORY", ratio
+    elif ratio >= 0.85: return "VICTORY", ratio
+    else: return "DEFEAT", ratio
 
-❌ **CANNOT WIN** — Even with perfect rolls (100% us, 40% them), attacker's military advantage is insurmountable.
-            """
-        
-        strategy_summary, sequence = self.build_strategy()
-        
-        report = f"""
-🔴 WAR #{self.war['id']}
-⚔️ Attacker: {self.attacker['leader_name']} ({self.attacker['nation_name']}) — Score {self.attacker['score']}
-  🪖 {self.att_soldiers:,} | 🛡️ {self.att_tanks:,} | ✈️ {self.att_aircraft:,} | 🚢 {self.att_ships:,}
-🛡️ Defending: {self.defender['leader_name']} ({self.defender['nation_name']})
+def generate_precise_tactical_sequence(attacker, defender):
+    plan = []
+    steps = 1
+    air_sup = False
+    
+    if defender["aircraft"] > 0 and attacker["aircraft"] > 0:
+        plan.append(f"**Step {steps}: Operations in the Sky**\n  ↳ Deploy {attacker['aircraft']} Aircraft on Dogfight sweeps to break Air Superiority.")
+        steps += 1
+        air_sup = True
 
-✅ **CAN WIN** — Attacker is vulnerable.
+    if defender["ships"] > 0 and attacker["ships"] > 0:
+        plan.append(f"**Step {steps}: Global Market Isolation**\n  ↳ Execute Naval Blockade using {attacker['ships']} Ships.")
+        steps += 1
 
-**Strategy Overview:**
-{strategy_summary}
+    rem_resistance = 100
+    ground_hits = 0
+    while rem_resistance > 10 and ground_hits < 4:
+        outcome, _ = run_3_roll_simulation(
+            calculate_combat_value("soldiers", attacker["soldiers"]) + calculate_combat_value("tanks", attacker["tanks"]),
+            calculate_combat_value("soldiers", defender["soldiers"]) + calculate_combat_value("tanks", defender["tanks"], air_superiority=air_sup),
+            air_superiority=air_sup, is_tank=True
+        )
+        if outcome in ["IMMENSE TRIUMPH", "MAJOR VICTORY"]:
+            plan.append(f"**Step {steps}: Ground Operation {ground_hits + 1}**\n  ↳ Launch Ground Assault. Result: **{outcome}** (-10 Resistance).")
+            rem_resistance -= 10
+            ground_hits += 1
+            steps += 1
+        else: break
 
-**Recommended Attack Sequence:**
-"""
-        for i, attack in enumerate(sequence, 1):
-            report += f"{i}. {attack}\n"
-        
-        best = self.simulate_battle(self.att_soldiers, self.att_tanks, self.att_aircraft, self.att_ships,
-                                     self.def_soldiers, self.def_tanks, self.def_aircraft, self.def_ships,
-                                     scenario="best")
-        avg = self.simulate_battle(self.att_soldiers, self.att_tanks, self.att_aircraft, self.att_ships,
-                                    self.def_soldiers, self.def_tanks, self.def_aircraft, self.def_ships,
-                                    scenario="average")
-        worst = self.simulate_battle(self.att_soldiers, self.att_tanks, self.att_aircraft, self.att_ships,
-                                      self.def_soldiers, self.def_tanks, self.def_aircraft, self.def_ships,
-                                      scenario="worst")
-        
-        report += f"""
-**Combat Simulation:**
-🔵 **Average (70% rolls):** {avg['victory']} | Casualties: ~{avg['att_soldier_loss']:,} soldiers, ~{avg['att_tank_loss']:,} tanks
-🟢 **Best (100% us, 40% them):** {best['victory']} | Casualties: ~{best['att_soldier_loss']:,} soldiers, ~{best['att_tank_loss']:,} tanks
-🔴 **Worst (40% us, 100% them):** {worst['victory']} | Casualties: ~{worst['att_soldier_loss']:,} soldiers, ~{worst['att_tank_loss']:,} tanks
+    plan.append(f"**Step {steps}: The Ultimatum**\n  ↳ Deliver final Ground Strike to drop resistance to 0 and secure Beige loot.")
+    return "\n".join(plan)
 
-**War State:**
-• Resistance: {self.defender_resistance}/100
-• Air Superiority: {"Attacker" if self.air_superiority == "Attacker" else "Defender" if self.air_superiority == "Defender" else "Contested"}
-• Naval Blockade: {"Active" if self.naval_blockade == "Attacker" else "None"}
-        """
-        
-        return report
-
-# ============================================================================
-# Discord Commands
-# ============================================================================
-
+# --- BOT EVENTS ---
 @bot.event
 async def on_ready():
-    logger.info(f"☭ Logged in as {bot.user}")
+    logger.info(f"☭ Commissar {bot.user} has assumed operational command.")
     guild_obj = discord.Object(id=YOUR_SERVER_ID)
     bot.tree.copy_global_to(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
-    logger.info(f"☭ Synced commands to guild {YOUR_SERVER_ID}")
+    logger.info(f"⭐ Directives securely mapped to server frame: {YOUR_SERVER_ID}")
 
-@bot.tree.command(name="counter", description="Analyze all defensive wars and build precise attack strategies")
-@app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
-async def counter_command(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            logger.info("Testing P&W API connection...")
-            
-            # Test basic nation query first
-            test_query = """
-            query {
-              nation(id: 634658) {
-                id
-                leader_name
-                nation_name
-              }
-            }
-            """
-            
-            test_data = await pandw_query(session, test_query)
-            logger.info(f"Test query result: {test_data}")
-            
-            # Fetch alliance wars
-            wars_query = """
-            query($id: Int!) {
-              alliance(id: $id) {
-                wars {
-                  id
-                  attacker_id
-                  defender_id
-                  attacker_resistance
-                  defender_resistance
-                  attacker_map
-                  defender_map
-                  ground_control
-                  air_superiority
-                  naval_blockade
-                  status
-                }
-              }
-            }
-            """
-            
-            wars_data = await pandw_query(session, wars_query, {"id": PANDW_ALLIANCE_ID})
-            logger.info(f"Wars data: {wars_data}")
-            wars = wars_data.get("alliance", {}).get("wars", [])
-            
-            if not wars:
-                await interaction.followup.send("☭ No active wars detected.")
-                return
-            
-            # Analyze each war
-            for war in wars[:10]:
-                attacker_id = war.get("attacker_id")
-                defender_id = war.get("defender_id")
-                
-                nations_query = """
-                query($attacker: Int!, $defender: Int!) {
-                  attacker: nation(id: $attacker) {
-                    id
-                    leader_name
-                    nation_name
-                    score
-                    soldiers
-                    tanks
-                    aircraft
-                    ships
-                  }
-                  defender: nation(id: $defender) {
-                    id
-                    leader_name
-                    nation_name
-                    score
-                    soldiers
-                    tanks
-                    aircraft
-                    ships
-                  }
-                }
-                """
-                
-                nations_data = await pandw_query(session, nations_query, 
-                                                 {"attacker": attacker_id, "defender": defender_id})
-                
-                attacker = nations_data.get("attacker", {})
-                defender = nations_data.get("defender", {})
-                
-                analyzer = WarAnalyzer(war, attacker, defender)
-                report = analyzer.generate_report()
-                
-                if len(report) > 2000:
-                    chunks = [report[i:i+1900] for i in range(0, len(report), 1900)]
-                    for chunk in chunks:
-                        await interaction.followup.send(chunk)
-                else:
-                    await interaction.followup.send(report)
-                
-                await asyncio.sleep(0.5)
-    
-    except Exception as e:
-        logger.exception("Error in /counter")
-        error_msg = f"❌ Party communications failed: {str(e)}"
-        await interaction.followup.send(error_msg)
+# --- COMMANDS ---
 
 @bot.tree.command(name="status", description="Show bot status")
 @app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
-async def status_command(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        f"☭ **URS Commissar Online**\n"
-        f"API Key configured: {bool(P_AND_W_API_KEY)}\n"
-        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    )
+async def status(interaction: discord.Interaction):
+    await interaction.response.send_message(f"☭ **URS Commissar Online**\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
-# ============================================================================
-# Entry Point
-# ============================================================================
+@bot.tree.command(name="register", description="Bind your physical state parameters to your Discord profile.")
+@app_commands.describe(nation_id="Your unique numerical P&W nation ID string.")
+@app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
+async def register(interaction: discord.Interaction, nation_id: int):
+    await interaction.response.defer(ephemeral=True)
+    query = 'query ($id: ID!) { nation(id: $id) { leader_name, name, alliance_id } }'
+    try:
+        data = await fetch_pw_api(query, {"id": nation_id})
+        nation = data.get("nation")
+        if not nation: return await interaction.followup.send("❌ Target state profile could not be discovered.")
+        if nation["alliance_id"] != str(ALLIANCE_ID): return await interaction.followup.send(f"❌ State belongs to alliance [{nation['alliance_id']}]. Must reside inside URS [14873].")
+            
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("INSERT OR REPLACE INTO registration (discord_id, nation_id, leader_name, nation_name) VALUES (?, ?, ?, ?)", 
+                     (interaction.user.id, nation_id, nation["leader_name"], nation["name"]))
+        conn.commit()
+        conn.close()
+        await interaction.followup.send(f"✅ **Registration Locked!** Tied to: **{nation['leader_name']} ({nation['name']})**.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failure: {str(e)}")
 
-async def main():
-    # Start HTTP server
-    await start_http_server()
-    
-    # Start Discord bot
-    if not DISCORD_TOKEN or not P_AND_W_API_KEY:
-        logger.error("❌ Missing DISCORD_TOKEN or P_AND_W_API_KEY")
-        return
-    
-    logger.info("☭ URS Commissar starting...")
-    await bot.start(DISCORD_TOKEN)
+@bot.tree.command(name="mobilize", description="Execute inventory diagnostics for all active Frontline Comrades.")
+@app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
+async def mobilize(interaction: discord.Interaction):
+    await interaction.response.defer()
+    query = 'query ($id: ID!) { alliance(id: $id) { nations { leader_name, name, cities { id }, soldiers, tanks, aircraft, ships, money, steel, aluminum } } }'
+    try:
+        data = await fetch_pw_api(query, {"id": ALLIANCE_ID})
+        nations = data.get("alliance", {}).get("nations", [])
+        if not nations: return await interaction.followup.send("❌ No citizens registered.")
+            
+        output_buffer = ["☭ **PEOPLE'S MOBILIZATION DIRECTIVE** ☭\n"]
+        total_deficients = 0
+        
+        for nation in nations:
+            city_count = len(nation["cities"])
+            max_sol = city_count * MILITARY_CAPS["soldiers_per_city"]
+            max_tnk = city_count * MILITARY_CAPS["tanks_per_city"]
+            max_air = city_count * MILITARY_CAPS["aircraft_per_city"]
+            max_shp = city_count * MILITARY_CAPS["ships_per_city"]
+            
+            s_def = max(0, max_sol - nation["soldiers"])
+            t_def = max(0, max_tnk - nation["tanks"])
+            a_def = max(0, max_air - nation["aircraft"])
+            sh_def = max(0, max_shp - nation["ships"])
+            
+            if s_def > 0 or t_def > 0 or a_def > 0 or sh_def > 0:
+                total_deficients += 1
+                output_buffer.append(
+                    f"⛑️ **Comrade {nation['leader_name']}** ({nation['name']}) — 🏙️ {city_count} Cities\n"
+                    f" ┣ 🪖 Soldiers: {nation['soldiers']:,} / {max_sol:,} *(need +{s_def:,})*\n"
+                    f" ┣ 🛡️ Tanks:    {nation['tanks']:,} / {max_tnk:,} *(need +{t_def:,})*\n"
+                    f" ┣ ✈️ Aircraft: {nation['aircraft']:,} / {max_air:,} *(need +{a_def:,})*\n"
+                    f" ┣ 🚢 Ships:    {nation['ships']:,} / {max_shp:,} *(need +{sh_def:,})*\n"
+                    f" ┗ 💵 ${nation['money']:,.2f} | ⚙️ {nation['steel']:,}t Steel | 🔩 {nation['aluminum']:,}t Alum\n"
+                )
+        
+        if total_deficients == 0: return await interaction.followup.send("⭐ **THE PEOPLE'S ARMY STANDS FULLY MOBILIZED!**")
+        for i, chunk in enumerate(chunk_text("\n".join(output_buffer))):
+            await interaction.followup.send(chunk) if i == 0 else await interaction.channel.send(chunk)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failure: {str(e)}")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@bot.tree.command(name="grant", description="Calculate material allocations needed to plug production deficits.")
+@app_commands.guilds(discord.Object(id=YOUR_SERVER_ID))
+async def grant(interaction: discord.Interaction, soldiers: int=0, tanks: int=0, aircraft: int=0, ships: int=0):
+    cash = (soldiers * 121.25) + (tanks * 1487.50) + (aircraft * 4850.00) + (ships * 24250.00)
+    steel, alum = (tanks * 0.50) + (ships * 25.00), (aircraft * 5.00) + (ships * 5.00)
+    embed = discord.Embed(title="☭ REVOLUTIONARY RESOURCE ALLOCATION ☭", color=discord.Color.red())
+    embed.add_field(name="Required Materials", value=f"💵 ${cash:,.2f} | ⚙️ {steel:,}t Steel | 🔩 {alum:,}t Alum", inline=False)
+    embed.add_field(name="🏦 PASTE INTO ALLIANCE TREASURY", value=f"
+http://googleusercontent.com/immersive_entry_chip/0
+
